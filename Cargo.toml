@@ -1,8 +1,8 @@
 [package]
-name = "ros-serialgen"
+name = "rosgen"
 version = "0.2.0"
 edition = "2021"
-description = "RouterOS L6 Serial Generator & License Key Converter"
+description = "RouterOS System Identifier Generator"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

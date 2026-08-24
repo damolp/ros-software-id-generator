@@ -90,7 +90,7 @@ fn mt_base64_encode(data: &[u8]) -> String {
 }
 
 /// MikroTik Base64 decoding (LSB-first bit order)
-fn mt_base64_decode(data: &str) -> Result<Vec<u8>, String> {
+pub fn mt_base64_decode(data: &str) -> Result<Vec<u8>, String> {
     let bytes: Vec<u8> = data
         .bytes()
         .filter(|&b| b != b'=')
@@ -124,7 +124,7 @@ fn mt_base64_decode(data: &str) -> Result<Vec<u8>, String> {
 }
 
 /// hex string → byte array
-fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
+pub fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
     let hex = hex.trim();
     if hex.len() % 2 != 0 {
         return Err("hex string must have even length".to_string());
@@ -139,7 +139,7 @@ fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
 }
 
 /// byte array → uppercase hex string
-fn hex_encode(bytes: &[u8]) -> String {
+pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02X}", b)).collect()
 }
 
