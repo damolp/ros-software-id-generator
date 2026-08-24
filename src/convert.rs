@@ -3,6 +3,8 @@
 //! Key text = MTBase64Encode(the 64 bytes of signature_hex)
 //! signature_hex = hex representation of MTBase64Decode(Key text)
 
+// TODO: remove below once tidied up
+#![allow(dead_code)] 
 /// MTBase64 character table (same alphabet as standard Base64, but LSB-first bit order)
 const BASE64_TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -10,7 +12,10 @@ const BASE64_TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 pub fn signature_to_key_text(signature_hex: &str) -> Result<String, String> {
     let sig_bytes = hex_decode(signature_hex)?;
     if sig_bytes.len() != 64 {
-        return Err(format!("signature must be 64 bytes, got {}", sig_bytes.len()));
+        return Err(format!(
+            "signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        ));
     }
 
     let encoded = mt_base64_encode(&sig_bytes);
@@ -76,9 +81,7 @@ fn mt_base64_encode(data: &[u8]) -> String {
     }
 
     if pending_bits != 0 {
-        encoded.push(
-            BASE64_TABLE[(data[data.len() - 1] >> (8 - pending_bits)) as usize] as char,
-        );
+        encoded.push(BASE64_TABLE[(data[data.len() - 1] >> (8 - pending_bits)) as usize] as char);
     }
 
     // Padding
@@ -91,10 +94,7 @@ fn mt_base64_encode(data: &[u8]) -> String {
 
 /// MikroTik Base64 decoding (LSB-first bit order)
 pub fn mt_base64_decode(data: &str) -> Result<Vec<u8>, String> {
-    let bytes: Vec<u8> = data
-        .bytes()
-        .filter(|&b| b != b'=')
-        .collect();
+    let bytes: Vec<u8> = data.bytes().filter(|&b| b != b'=').collect();
 
     let mut result = Vec::new();
     let mut pending_bits = 0u32;
@@ -150,7 +150,9 @@ mod tests {
     #[test]
     fn test_roundtrip_synthetic() {
         // Synthetic 64-byte signature; verify sig→key→sig round-trips exactly.
-        let sig: String = (0..64).map(|i| format!("{:02X}", (i * 7 + 3) as u8)).collect();
+        let sig: String = (0..64)
+            .map(|i| format!("{:02X}", (i * 7 + 3) as u8))
+            .collect();
 
         // sig → key
         let key = signature_to_key_text(&sig).unwrap();

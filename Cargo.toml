@@ -7,6 +7,10 @@ description = "RouterOS System Identifier Generator"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 
+[dev-dependencies]
+assert_cmd = "2.0"
+predicates = "3.1"
+
 [profile.release]
 opt-level = 3
 lto = true
