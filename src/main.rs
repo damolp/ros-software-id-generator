@@ -6,6 +6,7 @@ mod targets;
 
 use std::convert::TryInto;
 use std::path::PathBuf;
+use std::process;
 
 use crate::convert::hex_decode;
 use crate::convert::hex_encode;
@@ -13,6 +14,7 @@ use crate::convert::key_text_to_signature;
 use crate::convert::mt_base64_decode;
 use crate::sha256::hash_40;
 use crate::sha256_constants::ROUND_CONSTANTS;
+use crate::software_id::decode;
 use crate::software_id::encode;
 use crate::targets::mix_from_identity;
 
@@ -28,16 +30,37 @@ enum DiskType {
 #[derive(Parser, Debug)]
 #[command(name = "checker", version, about = "Checks a file or a literal string")]
 #[command(group(
-  ArgGroup::new("input")
-      .required(true)
-      .args(["check", "check_string", "generate"]),
-))]
+      ArgGroup::new("input")
+          .required(true)
+          .args(["check", "check_string", "check_id", "generate", "generate_id"]),
+  ))]
+#[command(group(
+      ArgGroup::new("mbr_modes")
+          .multiple(true)
+          .args(["generate", "check_id", "generate_id"]),
+  ))]
+
 struct Cli {
     #[arg(long, value_name = "FILE")]
     check: Option<PathBuf>,
 
     #[arg(long = "check-string", value_name = "STRING")]
     check_string: Option<String>,
+
+    #[arg(long = "check-id", value_name = "ID", requires_all = ["lo", "hi"])]
+    check_id: bool,
+
+    #[arg(long = "generate-id", value_name = "ID", requires_all = ["software_id"])]
+    generate_id: bool,
+
+    #[arg(long = "software-id", value_name = "STRING")]
+    software_id: Option<String>,
+
+    #[arg(long, value_name = "HEX", requires = "check_id", value_parser = parse_hex_u32)]
+    lo: Option<u32>,
+
+    #[arg(long, value_name = "HEX", requires = "check_id", value_parser = parse_hex_u8)]
+    hi: Option<u8>,
 
     #[arg(long, requires_all = ["model", "serial", "size", "disk_type"])]
     generate: bool,
@@ -51,11 +74,28 @@ struct Cli {
     #[arg(long, value_name = "INT", requires = "generate")]
     size: Option<u32>,
 
-    #[arg(long, value_name = "HEX", requires = "generate", value_parser = parse_hex10)]
+    #[arg(long, value_name = "HEX", requires = "mbr_modes", value_parser = parse_hex10)]
     mbr: Option<[u8; 10]>,
 
     #[arg(long = "type", value_name = "TYPE", requires = "generate", value_enum)]
     disk_type: Option<DiskType>,
+}
+
+fn parse_hex_u32(s: &str) -> Result<u32, String> {
+    let body = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    let cleaned = body.replace('_', "");
+    if cleaned.is_empty() {
+        return Err("expected a hex value, e.g. 0x100".to_string());
+    }
+    u32::from_str_radix(&cleaned, 16).map_err(|e| format!("invalid hex value {s:?}: {e}"))
+}
+
+fn parse_hex_u8(s: &str) -> Result<u8, String> {
+    let v = parse_hex_u32(s)?;
+    u8::try_from(v).map_err(|_| format!("0x{v:x} does not fit in a byte (max 0xff)"))
 }
 
 fn parse_hex10(s: &str) -> Result<[u8; 10], String> {
@@ -154,13 +194,51 @@ fn main() -> std::io::Result<()> {
         ));
     } else if let Some(s) = cli.check_string.as_deref() {
         return Ok(decode_license(mt_base64_decode(&s).unwrap()));
+    } else if cli.check_id {
+        let mbr = cli.mbr.unwrap_or([0u8; 10]);
+        let (mix_lo, mix_hi) = mix_from_identity(&mbr);
+        let sid_lo = cli.lo.unwrap();
+        let sid_hi = cli.hi.unwrap();
+        let final_lo = sid_lo ^ mix_lo;
+        let final_hi = ((sid_hi as u32) | 0x100) ^ mix_hi;
+        let final_hash: u64 = ((final_hi as u64) << 32) | (final_lo as u64);
+        println!("software-id: {}", encode(final_hash));
+        return Ok(());
+    } else if cli.generate_id {
+        let software_id = cli.software_id.unwrap();
+        let mbr = cli.mbr.unwrap_or([0u8; 10]);
+        let (mix_lo, mix_hi) = mix_from_identity(&mbr);
+        let final_hash = decode(&software_id).unwrap_or_else(|err| {
+            println!("failed to decode: {}", err);
+            process::exit(1);
+        });
+
+        let final_lo = final_hash as u32;
+        let final_hi = (final_hash >> 32) as u32;
+
+        let sid_lo = final_lo ^ mix_lo;
+
+        let h = final_hi ^ mix_hi;
+        if h & !0xff != 0x100 {
+            println!("failed - valid b35, but not valid sw id");
+            process::exit(1);
+        }
+        let sid_hi = (h & 0xff) as u8;
+        println!("final_lo: 0x{:x}, final_hi: 0x{:x}", final_lo, final_hi);
+        println!("mix_lo: 0x{:x}, mix_hi: 0x{:x}", mix_lo, mix_hi);
+        println!("sid_lo: 0x{:x}, sid_hi: 0x{:x}", sid_lo, sid_hi);
+        println!("software id (encoded): {}", encode(final_hash));
+        let final2_lo = sid_lo ^ mix_lo;
+        let final2_hi = ((sid_hi as u32) | 0x100) ^ mix_hi;
+        let final2_hash: u64 = ((final2_hi as u64) << 32) | (final2_lo as u64);
+        println!("softwareid (computed): {}", encode(final2_hash));
     } else if cli.generate {
         let model = cli.model.as_deref().unwrap();
         let serial = cli.serial.as_deref().unwrap();
         let mut size = cli.size.unwrap();
         match cli.disk_type.unwrap() {
             DiskType::Nvme => size = size.next_multiple_of(16),
-            DiskType::Scsi => size = 0,    // SCSI is 0
+            DiskType::Scsi => size = 0, // SCSI is 0
             DiskType::Ide => size = software_id::round_sectors((size / 512 >> 11) as u32),
         }
         let mut fp = [0x20u8; 40];
@@ -198,51 +276,59 @@ fn main() -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-  mod tests {
-      use assert_cmd::Command;
-      use predicates::str::contains;
-  
-      const BIN: &str = env!("CARGO_PKG_NAME");
-  
-      fn cmd() -> Command {
-          Command::cargo_bin(BIN).expect("binary should be built by cargo test")
-      }
+mod tests {
+    use assert_cmd::Command;
+    use predicates::str::contains;
 
-      // MBR bit Zeroed Out - NVME
-      // /dev/nvme0n1: hdd-model='QEMU NVMe Ctrl  ' s='vol-12345           ' sz=128 MB
-      // F1U9-DYQW
-      #[test]
-      fn test_nvme_zeroed_mbr() {
-          cmd()
-              .args([
-                  "--generate",
-                  "--model", "QEMU NVMe Ctrl",
-                  "--serial", "vol-12345",
-                  "--size", "128",
-                  "--type", "nvme"
-              ])
-              .assert()
-              .success()
-              .stdout(contains("F1U9-DYQW"));
-      }
+    const BIN: &str = env!("CARGO_PKG_NAME");
 
-      // MBR bit Zeroed Out - SCSI
-      // /dev/sda: hdd-model='1234            ' s='5678                ' sz=0 MB
-      // BKT4-YM6W
-      #[test]
-      fn test_scsi_zeroed_mbr() {
-          cmd()
-              .args([
-                  "--generate",
-                  "--model", "1234",
-                  "--serial", "5678",
-                  "--size", "1000", // ignored
-                  "--type", "scsi"
-              ])
-              .assert()
-              .success()
-              .stdout(contains("BKT4-YM6W"));
-      }
+    fn cmd() -> Command {
+        Command::cargo_bin(BIN).expect("binary should be built by cargo test")
+    }
+
+    // MBR bit Zeroed Out - NVME
+    // /dev/nvme0n1: hdd-model='QEMU NVMe Ctrl  ' s='vol-12345           ' sz=128 MB
+    // F1U9-DYQW
+    #[test]
+    fn test_nvme_zeroed_mbr() {
+        cmd()
+            .args([
+                "--generate",
+                "--model",
+                "QEMU NVMe Ctrl",
+                "--serial",
+                "vol-12345",
+                "--size",
+                "128",
+                "--type",
+                "nvme",
+            ])
+            .assert()
+            .success()
+            .stdout(contains("F1U9-DYQW"));
+    }
+
+    // MBR bit Zeroed Out - SCSI
+    // /dev/sda: hdd-model='1234            ' s='5678                ' sz=0 MB
+    // BKT4-YM6W
+    #[test]
+    fn test_scsi_zeroed_mbr() {
+        cmd()
+            .args([
+                "--generate",
+                "--model",
+                "1234",
+                "--serial",
+                "5678",
+                "--size",
+                "1000", // ignored
+                "--type",
+                "scsi",
+            ])
+            .assert()
+            .success()
+            .stdout(contains("BKT4-YM6W"));
+    }
 
     // MBR Set - NVME
     // /dev/nvme0n1: hdd-model='QEMU NVMe Ctrl  ' s='vol-1234            ' sz=128 MB
@@ -250,81 +336,101 @@ fn main() -> std::io::Result<()> {
     // mbr: `0100:  97 38 60 60 52 27 13 67 51 08 52 d0 00 00 00 00`
 
     #[test]
-      fn test_nvme_set_mbr() {
-          cmd()
-              .args([
-                  "--generate",
-                  "--model", "QEMU NVMe Ctrl",
-                  "--serial", "vol-1234",
-                  "--size", "128",
-                  "--type", "nvme",
-                  "--mbr", "97 38 60 60 52 27 13 67 51 08 52 d0 00 00 00 00",
-              ])
-              .assert()
-              .success()
-              .stdout(contains("0FIK-K9ZJ"));
-      }
-    
+    fn test_nvme_set_mbr() {
+        cmd()
+            .args([
+                "--generate",
+                "--model",
+                "QEMU NVMe Ctrl",
+                "--serial",
+                "vol-1234",
+                "--size",
+                "128",
+                "--type",
+                "nvme",
+                "--mbr",
+                "97 38 60 60 52 27 13 67 51 08 52 d0 00 00 00 00",
+            ])
+            .assert()
+            .success()
+            .stdout(contains("0FIK-K9ZJ"));
+    }
+
     // /dev/nvme0n1: hdd-model='QEMU NVMe Ctrl  ' s='vol-1234            ' sz=138 MB
     // 9E8X-02NE
-    // 0100:  97 38 60 60 52 27 13 67 51 08 52 d0 01 00 00 00 
+    // 0100:  97 38 60 60 52 27 13 67 51 08 52 d0 01 00 00 00
     #[test]
-      fn test_nvme_set_mbr_odd_size() {
-          cmd()
-              .args([
-                  "--generate",
-                  "--model", "QEMU NVMe Ctrl",
-                  "--serial", "vol-1234",
-                  "--size", "138",
-                  "--type", "nvme",
-                  "--mbr", "97 38 60 60 52 27 13 67 51 08 52 d0 00 00 00 00",
-              ])
-              .assert()
-              .success()
-              .stdout(contains("9E8X-02NE"));
-      }
+    fn test_nvme_set_mbr_odd_size() {
+        cmd()
+            .args([
+                "--generate",
+                "--model",
+                "QEMU NVMe Ctrl",
+                "--serial",
+                "vol-1234",
+                "--size",
+                "138",
+                "--type",
+                "nvme",
+                "--mbr",
+                "97 38 60 60 52 27 13 67 51 08 52 d0 00 00 00 00",
+            ])
+            .assert()
+            .success()
+            .stdout(contains("9E8X-02NE"));
+    }
 
     // /dev/nvme0n1: hdd-model='QEMU NVMe Ctrl  ' s='MyReallyCoolNvmeSeri' sz=1272 MB
     // R1YJ-A7CK
     // 0100:  75 34 11 94 79 12 44 75 65 14 57 9b 02 00 00 00
     #[test]
-      fn test_nvme_set_mbr_full_serial() {
-          cmd()
-              .args([
-                  "--generate",
-                  "--model", "QEMU NVMe Ctrl",
-                  "--serial", "MyReallyCoolNvmeSeri",
-                  "--size", "1272",
-                  "--type", "nvme",
-                  "--mbr", "75 34 11 94 79 12 44 75 65 14 57 9b 02 00 00 00",
-              ])
-              .assert()
-              .success()
-              .stdout(contains("R1YJ-A7CK"));
-      }
+    fn test_nvme_set_mbr_full_serial() {
+        cmd()
+            .args([
+                "--generate",
+                "--model",
+                "QEMU NVMe Ctrl",
+                "--serial",
+                "MyReallyCoolNvmeSeri",
+                "--size",
+                "1272",
+                "--type",
+                "nvme",
+                "--mbr",
+                "75 34 11 94 79 12 44 75 65 14 57 9b 02 00 00 00",
+            ])
+            .assert()
+            .success()
+            .stdout(contains("R1YJ-A7CK"));
+    }
 
     // /dev/nvme0n1: hdd-model='QEMU NVMe Ctrl  ' s='MyReallyCoolNvmeSeri' sz=1272 MB
     // 1CNM-CYSJ
-    // 0100:  68 26 84 66 46 66 29 72 56 58 4e 42 00 00 00 00 
+    // 0100:  68 26 84 66 46 66 29 72 56 58 4e 42 00 00 00 00
     #[test]
-      fn test_scsi_set_mbr_full_serial() {
-          cmd()
-              .args([
-                  "--generate",
-                  "--model", "really-really-re",
-                  "--serial", "12345678912345678900",
-                  "--size", "1929292",
-                  "--type", "scsi",
-                  "--mbr", "68 26 84 66 46 66 29 72 56 58 4e 42 00 00 00 00",
-              ])
-              .assert()
-              .success()
-              .stdout(contains("1CNM-CYSJ"));
-      }
+    fn test_scsi_set_mbr_full_serial() {
+        cmd()
+            .args([
+                "--generate",
+                "--model",
+                "really-really-re",
+                "--serial",
+                "12345678912345678900",
+                "--size",
+                "1929292",
+                "--type",
+                "scsi",
+                "--mbr",
+                "68 26 84 66 46 66 29 72 56 58 4e 42 00 00 00 00",
+            ])
+            .assert()
+            .success()
+            .stdout(contains("1CNM-CYSJ"));
+    }
 
     #[test]
-      fn test_check_str() {
-          cmd()
+    fn test_check_str() {
+        cmd()
               .args([
                   "--check-string",
                   "mr3jH5qhn9irtF53ZICFTN7Tk7wIx7ZkxdAxJ19ydASYShhFteHMntBTyaS8wuNdIJJPidJxbuNPLTvCsv7zLA=="
@@ -332,11 +438,48 @@ fn main() -> std::io::Result<()> {
               .assert()
               .success()
               .stdout(contains("TI09-7WK3"));
-      }
+    }
 
-      #[test]
-      fn no_args_is_an_error() {
-          cmd().assert().failure();
-      }
-  }
+    #[test]
+    fn test_generate_vanity_invalid() {
+        cmd()
+              .args([
+                  "--generate-id",
+                  "--software-id", "DAM0-DAM0"
+              ])
+              .assert()
+              .failure()
+              .stdout(contains("failed"));
+    }
 
+    #[test]
+    fn test_generate_vanity_valid() {
+        cmd()
+              .args([
+                  "--generate-id",
+                  "--software-id", "DAM0-NET2"
+              ])
+              .assert()
+              .success()
+              .stdout(contains("DAM0-NET2"));
+    }
+
+    #[test]
+    fn test_check_id_valid() {
+        cmd()
+              .args([
+                  "--check-id",
+                  "--lo", "0x100",
+                  "--hi", "0x10",
+              ])
+              .assert()
+              .success()
+              .stdout(contains("3EY6-YA4G"));
+    }
+
+
+    #[test]
+    fn no_args_is_an_error() {
+        cmd().assert().failure();
+    }
+}

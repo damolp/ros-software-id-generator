@@ -4,7 +4,7 @@
 //! signature_hex = hex representation of MTBase64Decode(Key text)
 
 // TODO: remove below once tidied up
-#![allow(dead_code)] 
+#![allow(dead_code)]
 /// MTBase64 character table (same alphabet as standard Base64, but LSB-first bit order)
 const BASE64_TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

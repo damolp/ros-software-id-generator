@@ -9,7 +9,7 @@
 //! signature_hex = "..."
 //! ```
 // TODO: Remove below to tidy up
-#![allow(dead_code)] 
+#![allow(dead_code)]
 use crate::software_id;
 use std::fs;
 use std::path::Path;
